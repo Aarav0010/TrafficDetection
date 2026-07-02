@@ -1,0 +1,14 @@
+# Ignore unnecessary files
+__pycache__/
+*.pyc
+*.pyo
+.git/
+.gitignore
+*.md
+build/
+*.cpp
+CMakeLists.txt
+best_optimized_fp16.onnx
+best_optimized_fp32.onnx
+yolov8n.onnx
+runs/

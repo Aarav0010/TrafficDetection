@@ -1,0 +1,38 @@
+version: "3.8"
+
+services:
+  detection:
+    build: .
+    container_name: traffic_detection
+
+    # --- GPU ACCESS ---
+    runtime: nvidia
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+    # --- DASHCAM / WEBCAM ACCESS ---
+    devices:
+      - /dev/video0:/dev/video0    # USB dashcam (change index if needed)
+    #  - /dev/video1:/dev/video1   # Uncomment for second camera
+
+    # --- NETWORK ---
+    ports:
+      - "5000:5000"
+
+    # --- ENVIRONMENT VARIABLES ---
+    environment:
+      - VIDEO_FILE=edited_ultimate_video.mp4   # Set to video file name
+      - CAMERA_INDEX=0                          # Camera index if no video
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility,video
+
+    # --- MOUNT VIDEO FILES (optional) ---
+    volumes:
+      - ./videos:/app/videos    # Mount a folder with extra video files
+
+    restart: unless-stopped
