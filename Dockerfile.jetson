@@ -1,0 +1,28 @@
+FROM nvcr.io/nvidia/l4t-ml:r35.2.1-py3
+
+# Install missing dependencies for GStreamer and OpenCV video I/O
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
+    pkg-config \
+    libgstreamer1.0-dev \
+    libgstreamer-plugins-base1.0-dev \
+    cmake \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Copy the Jetson pipeline source code and required assets
+COPY jetson_pipeline/ /app/jetson_pipeline/
+COPY yolov8n.onnx best.onnx "best (3).onnx" edited_ultimate_video.mp4 index.html image.png /app/
+
+# Build the C++ pipeline using the system OpenCV (which has CUDA+GStreamer pre-compiled on L4T)
+RUN mkdir -p /app/jetson_pipeline/build && \
+    cd /app/jetson_pipeline/build && \
+    cmake .. && \
+    make -j$(nproc)
+
+EXPOSE 5000
+
+# Run the executable, ensuring we execute in the correct working directory
+WORKDIR /app
+CMD ["./jetson_pipeline/build/traffic_detection"]

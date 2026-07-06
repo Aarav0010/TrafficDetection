@@ -1,6 +1,10 @@
-venv/
-__pycache__/
-*.mp4
-*.zip
-*.onnx
-*.pt
+build/
+deps/
+*.dll
+*.exe
+*.lib
+*.so
+*.a
+cpp_pipeline_package/
+traffic_detection_executable.zip
+cpp_pipeline_package.zip

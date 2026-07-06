@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Traffic Sign Detection</title>
+    <style>
+        #timer {
+            text-align: center;
+            font-size: xx-large;
+            padding: 20px;
+            width: 100%;
+        }
+  
+
+    </style>
+</head>
+<body>
+    <h1 style="text-align: center;">Traffic Sign Detection</h1>
+    <div class="container">
+        <img src="/image.png" style="height: 15%;width: 50%;position: relative; display:block; margin:auto; margin-bottom:20px;"> <!-- Replace "your_image_url.jpg" with your image URL or path -->
+    </div>
+    <img src="/video_feed" width="640" height="480" style="display:block; margin:auto;">
+    <div id="timer" ><span id="countdown">01:00</span></div>
+    <script>
+        function startTimer(display) {
+            setInterval(function () {
+                fetch('/time')
+                    .then(response => response.text())
+                    .then(data => {
+                        var videoTimeSec = parseFloat(data);
+                        var remaining = 60 - videoTimeSec;
+                        if (remaining < 0) remaining = 0;
+                        
+                        var minutes = parseInt(remaining / 60, 10);
+                        var seconds = parseInt(remaining % 60, 10);
+
+                        minutes = minutes < 10 ? "0" + minutes : minutes;
+                        seconds = seconds < 10 ? "0" + seconds : seconds;
+
+                        display.textContent = minutes + ":" + seconds;
+
+                        if (remaining <= 0) {
+                            display.textContent = "Subscription Expired 💔. Please Subscribe to enable the function ❤️‍🩹.";
+                        }
+                    })
+                    .catch(err => console.error('Error fetching time:', err));
+            }, 500); // Fetch twice a second
+        }
+
+        window.onload = function () {
+            var display = document.getElementById("countdown");
+            startTimer(display);
+        };
+    </script>
+</body>
+</html>
+
