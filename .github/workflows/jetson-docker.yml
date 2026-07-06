@@ -44,6 +44,6 @@ jobs:
           file: ./Dockerfile.jetson
           platforms: linux/arm64
           push: true
-          tags: ghcr.io/${{ github.repository }}/traffic-detection-jetson:latest
+          tags: ghcr.io/aarav0010/trafficdetection/traffic-detection-jetson:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
