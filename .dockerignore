@@ -5,10 +5,8 @@ __pycache__/
 .git/
 .gitignore
 *.md
-build/
-*.cpp
-CMakeLists.txt
-best_optimized_fp16.onnx
-best_optimized_fp32.onnx
-yolov8n.onnx
+cpp_pipeline/build/
+cpp_pipeline_package/
+traffic_detection_executable.zip
+cpp_pipeline_package.zip
 runs/
