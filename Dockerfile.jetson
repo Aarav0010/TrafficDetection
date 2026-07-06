@@ -13,7 +13,7 @@ WORKDIR /app
 
 # Copy the Jetson pipeline source code and required assets
 COPY jetson_pipeline/ /app/jetson_pipeline/
-COPY yolov8n.onnx best.onnx "best (3).onnx" edited_ultimate_video.mp4 index.html image.png /app/
+COPY ["yolov8n.onnx", "best.onnx", "best (3).onnx", "edited_ultimate_video.mp4", "index.html", "image.png", "/app/"]
 
 # Build the C++ pipeline using the system OpenCV (which has CUDA+GStreamer pre-compiled on L4T)
 RUN mkdir -p /app/jetson_pipeline/build && \
