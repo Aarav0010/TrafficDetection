@@ -59,7 +59,7 @@ struct Detection {
 // ============================================================================
 class YOLOModel {
 public:
-    YOLOModel(Ort::Env& env, const std::wstring& modelPath, int numClasses, int inputSize = 640)
+    YOLOModel(Ort::Env& env, const std::string& modelPath, int numClasses, int inputSize = 640)
         : numClasses_(numClasses), inputSize_(inputSize) {
         
         Ort::SessionOptions opts;
@@ -508,13 +508,13 @@ int main() {
         Ort::Env env(ORT_LOGGING_LEVEL_WARNING, "TrafficDetection");
 
         std::cout << "[INFO] Loading car model (yolov8n_quant.onnx)..." << std::endl;
-        YOLOModel carModel(env, L"yolov8n_quant.onnx", 80);     // COCO: 80 classes
+        YOLOModel carModel(env, "yolov8n_quant.onnx", 80);     // COCO: 80 classes
 
         std::cout << "[INFO] Loading sign model (best_quant.onnx)..." << std::endl;
-        YOLOModel signModel(env, L"best_quant.onnx", 8);          // 8 sign classes
+        YOLOModel signModel(env, "best_quant.onnx", 8);          // 8 sign classes
 
         std::cout << "[INFO] Loading speed model (best (3)_quant.onnx)..." << std::endl;
-        YOLOModel speedModel(env, L"best (3)_quant.onnx", 14, 960);    // 14 speed limit classes, 960x960 input
+        YOLOModel speedModel(env, "best (3)_quant.onnx", 14, 960);    // 14 speed limit classes, 960x960 input
 
         // Shared state for MJPEG streaming
         PipelineState state;
