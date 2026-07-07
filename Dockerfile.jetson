@@ -16,8 +16,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Download pre-compiled ONNX Runtime for ARM64 CPU (Extremely lightweight ~20MB)
-RUN wget -qO- https://github.com/microsoft/onnxruntime/releases/download/v1.18.0/onnxruntime-linux-aarch64-1.18.0.tgz | tar -xz -C /opt && \
+# Download pre-compiled ONNX Runtime for ARM64 CPU
+RUN wget -q https://github.com/microsoft/onnxruntime/releases/download/v1.18.0/onnxruntime-linux-aarch64-1.18.0.tgz -O onnxruntime.tgz && \
+    tar -xzf onnxruntime.tgz -C /opt && \
+    rm onnxruntime.tgz && \
     mv /opt/onnxruntime-linux-aarch64-1.18.0 /opt/onnxruntime
 
 ENV ONNXRUNTIME_DIR=/opt/onnxruntime
