@@ -1,25 +1,60 @@
-FROM nvcr.io/nvidia/l4t-ml:r35.2.1-py3
+# Ultra-lightweight CPU-only image for Jetson Orin (ARM64)
+# Solves the 5GB storage limit constraint by dropping Nvidia's 15GB l4t base.
+FROM arm64v8/ubuntu:22.04 AS builder
 
-# Install missing dependencies for GStreamer and OpenCV video I/O
-RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
-    pkg-config \
-    libgstreamer1.0-dev \
-    libgstreamer-plugins-base1.0-dev \
-    cmake \
+# Prevent tzdata interactive prompts
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install build tools and minimal OpenCV dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
+    cmake \
+    wget \
+    pkg-config \
+    libopencv-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Copy the Jetson pipeline source code and required assets
-COPY jetson_pipeline/ /app/jetson_pipeline/
-COPY ["yolov8n.onnx", "best.onnx", "best (3).onnx", "edited_ultimate_video.mp4", "index.html", "image.png", "/app/"]
+# Download pre-compiled ONNX Runtime for ARM64 CPU (Extremely lightweight ~20MB)
+RUN wget -qO- https://github.com/microsoft/onnxruntime/releases/download/v1.18.0/onnxruntime-linux-aarch64-1.18.0.tgz | tar -xz -C /opt && \
+    mv /opt/onnxruntime-linux-aarch64-1.18.0 /opt/onnxruntime
 
-# Build the C++ pipeline using the system OpenCV (which has CUDA+GStreamer pre-compiled on L4T)
-RUN mkdir -p /app/jetson_pipeline/build && \
-    cd /app/jetson_pipeline/build && \
-    cmake .. && \
-    make -j$(nproc)
+ENV ONNXRUNTIME_DIR=/opt/onnxruntime
+
+# Copy source code
+COPY jetson_pipeline/ /app/jetson_pipeline/
+
+# Build the C++ pipeline
+WORKDIR /app/jetson_pipeline/build
+RUN cmake .. && make -j$(nproc)
+
+# Final ultra-slim runtime image
+FROM arm64v8/ubuntu:22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libopencv-core4.5d \
+    libopencv-imgproc4.5d \
+    libopencv-dnn4.5d \
+    libopencv-videoio4.5d \
+    libopencv-highgui4.5d \
+    libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Copy ONNX Runtime shared library
+COPY --from=builder /opt/onnxruntime/lib/libonnxruntime.so.1.18.0 /usr/local/lib/
+COPY --from=builder /opt/onnxruntime/lib/libonnxruntime.so /usr/local/lib/
+RUN ldconfig
+
+# Copy compiled executable
+COPY --from=builder /app/jetson_pipeline/build/traffic_detection /app/
+
+# Copy quantized INT8 models, HTML, video, and image
+# NOTE: We are copying the *_quant.onnx models to fit within the storage limit
+COPY ["*_quant.onnx", "index.html", "image.png", "edited_ultimate_video.mp4", "/app/"]
 
 EXPOSE 5000
 

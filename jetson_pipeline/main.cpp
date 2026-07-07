@@ -11,6 +11,7 @@
 
 #include <opencv2/opencv.hpp>
 #include <opencv2/dnn.hpp>
+#include <onnxruntime_cxx_api.h>
 
 #include "deps/httplib.h"
 
@@ -58,18 +59,38 @@ struct Detection {
 // ============================================================================
 class YOLOModel {
 public:
-    YOLOModel(const std::string& modelPath, int numClasses, int inputSize = 640)
+    YOLOModel(Ort::Env& env, const std::wstring& modelPath, int numClasses, int inputSize = 640)
         : numClasses_(numClasses), inputSize_(inputSize) {
         
-        std::cout << "[INFO] Loading model via OpenCV DNN: " << modelPath << std::endl;
-        net_ = cv::dnn::readNetFromONNX(modelPath);
+        Ort::SessionOptions opts;
+        opts.SetIntraOpNumThreads(8); // Jetson Orin has up to 12 cores
+        opts.SetInterOpNumThreads(2);
+        opts.SetExecutionMode(ExecutionMode::ORT_SEQUENTIAL);
+        opts.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
+
+        // CPU ONLY - No CUDA provider added for Jetson CPU mode
+
+        session_ = std::make_unique<Ort::Session>(env, modelPath.c_str(), opts);
         
-        // Target Tensor Cores / CUDA
-        net_.setPreferableBackend(cv::dnn::DNN_BACKEND_CUDA);
-        net_.setPreferableTarget(cv::dnn::DNN_TARGET_CUDA_FP16);
+        // Get input/output info
+        Ort::AllocatorWithDefaultOptions allocator;
+        
+        auto inputName = session_->GetInputNameAllocated(0, allocator);
+        inputName_ = inputName.get();
+        
+        auto outputName = session_->GetOutputNameAllocated(0, allocator);
+        outputName_ = outputName.get();
+
+        auto inputShape = session_->GetInputTypeInfo(0).GetTensorTypeAndShapeInfo().GetShape();
+        std::cout << "[INFO] Loaded model, input shape: [";
+        for (size_t i = 0; i < inputShape.size(); i++) {
+            std::cout << inputShape[i];
+            if (i < inputShape.size() - 1) std::cout << ", ";
+        }
+        std::cout << "], classes: " << numClasses_ << std::endl;
     }
 
-    // Preprocess: letterbox resize
+    // Preprocess: letterbox resize + normalize + NCHW
     cv::Mat preprocess(const cv::Mat& frame, float& scaleX, float& scaleY, int& padX, int& padY) {
         int origW = frame.cols, origH = frame.rows;
         float scale = std::min((float)inputSize_ / origW, (float)inputSize_ / origH);
@@ -86,6 +107,12 @@ public:
         cv::Mat padded(inputSize_, inputSize_, CV_8UC3, cv::Scalar(114, 114, 114));
         resized.copyTo(padded(cv::Rect(padX, padY, newW, newH)));
 
+        // BGR -> RGB
+        cv::cvtColor(padded, padded, cv::COLOR_BGR2RGB);
+
+        // Normalize to [0, 1] and convert to float
+        padded.convertTo(padded, CV_32F, 1.0 / 255.0);
+
         return padded;
     }
 
@@ -93,31 +120,52 @@ public:
     std::vector<Detection> detect(const cv::Mat& frame, float confThreshold) {
         float scaleX, scaleY;
         int padX, padY;
-        cv::Mat padded = preprocess(frame, scaleX, scaleY, padX, padY);
+        cv::Mat input = preprocess(frame, scaleX, scaleY, padX, padY);
 
-        // create blob (handles BGR->RGB and 1.0/255.0 normalization)
-        cv::Mat blob = cv::dnn::blobFromImage(padded, 1.0/255.0, cv::Size(inputSize_, inputSize_), cv::Scalar(), true, false);
-        
-        net_.setInput(blob);
-        std::vector<cv::Mat> outputs;
-        net_.forward(outputs, net_.getUnconnectedOutLayersNames());
+        // HWC -> NCHW
+        std::vector<float> inputTensor(1 * 3 * inputSize_ * inputSize_);
+        for (int c = 0; c < 3; c++) {
+            for (int y = 0; y < inputSize_; y++) {
+                for (int x = 0; x < inputSize_; x++) {
+                    inputTensor[c * inputSize_ * inputSize_ + y * inputSize_ + x] =
+                        input.at<cv::Vec3f>(y, x)[c];
+                }
+            }
+        }
 
-        cv::Mat output = outputs[0];
-        const float* outputData = (float*)output.data;
+        // Create input tensor
+        std::array<int64_t, 4> inputShape = {1, 3, inputSize_, inputSize_};
+        auto memoryInfo = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
+        Ort::Value inputOrt = Ort::Value::CreateTensor<float>(
+            memoryInfo, inputTensor.data(), inputTensor.size(),
+            inputShape.data(), inputShape.size());
 
-        int numChannels = output.size[1]; // 4 + numClasses
-        int numDets = output.size[2];     // e.g. 8400
+        // Run inference
+        const char* inputNames[] = {inputName_.c_str()};
+        const char* outputNames[] = {outputName_.c_str()};
+        auto outputTensors = session_->Run(Ort::RunOptions{nullptr},
+            inputNames, &inputOrt, 1, outputNames, 1);
+
+        // Parse output: YOLOv8 output is [1, 4+numClasses, numDetections]
+        auto& output = outputTensors[0];
+        auto outputShape = output.GetTensorTypeAndShapeInfo().GetShape();
+        const float* outputData = output.GetTensorData<float>();
+
+        int channels = (int)outputShape[1]; // 4 + numClasses
+        int numDets = (int)outputShape[2];  // e.g. 8400
 
         std::vector<cv::Rect> boxes;
         std::vector<float> confidences;
         std::vector<int> classIds;
 
         for (int i = 0; i < numDets; i++) {
+            // Extract box: cx, cy, w, h
             float cx = outputData[0 * numDets + i];
             float cy = outputData[1 * numDets + i];
             float w  = outputData[2 * numDets + i];
             float h  = outputData[3 * numDets + i];
 
+            // Find best class
             float maxScore = 0;
             int maxClass = 0;
             for (int c = 0; c < numClasses_; c++) {
@@ -130,11 +178,13 @@ public:
 
             if (maxScore < confThreshold) continue;
 
+            // Convert from letterbox coords to original frame coords
             float x1 = (cx - w / 2 - padX) / scaleX;
             float y1 = (cy - h / 2 - padY) / scaleY;
             float x2 = (cx + w / 2 - padX) / scaleX;
             float y2 = (cy + h / 2 - padY) / scaleY;
 
+            // Clamp
             x1 = std::max(0.f, x1);
             y1 = std::max(0.f, y1);
             x2 = std::min((float)frame.cols, x2);
@@ -145,6 +195,7 @@ public:
             classIds.push_back(maxClass);
         }
 
+        // Apply NMS
         std::vector<int> nmsIndices;
         cv::dnn::NMSBoxes(boxes, confidences, confThreshold, NMS_THRESHOLD, nmsIndices);
 
@@ -156,7 +207,9 @@ public:
     }
 
 private:
-    cv::dnn::Net net_;
+    std::unique_ptr<Ort::Session> session_;
+    std::string inputName_;
+    std::string outputName_;
     int numClasses_;
     int inputSize_;
 };
@@ -238,10 +291,9 @@ void videoProcessingLoop(
     std::string source;
 
     if (std::ifstream(videoFile).good()) {
-        std::string gstreamer_pipeline = "filesrc location=" + videoFile + " ! qtdemux ! h264parse ! nvv4l2decoder ! nvvidconv ! video/x-raw, format=BGRx ! videoconvert ! video/x-raw, format=BGR ! appsink drop=1";
-        cap.open(gstreamer_pipeline, cv::CAP_GSTREAMER);
-        source = "VIDEO (NVDEC)";
-        std::cout << "[INFO] Using Jetson NVDEC for: " << videoFile << std::endl;
+        cap.open(videoFile);
+        source = "VIDEO";
+        std::cout << "[INFO] Using video file: " << videoFile << std::endl;
     } else {
         cap.open(0);
         source = "LIVE";
@@ -452,14 +504,17 @@ int main() {
         std::cout << "\n=== Traffic Light & Car Detection (C++ Pipeline) ===" << std::endl;
         std::cout << "Open http://localhost:5000 in your browser\n" << std::endl;
 
-        std::cout << "[INFO] Loading car model (yolov8n.onnx)..." << std::endl;
-        YOLOModel carModel("yolov8n.onnx", 80);     // COCO: 80 classes
+        // Initialize ONNX Runtime
+        Ort::Env env(ORT_LOGGING_LEVEL_WARNING, "TrafficDetection");
 
-        std::cout << "[INFO] Loading sign model (best.onnx)..." << std::endl;
-        YOLOModel signModel("best.onnx", 8);          // 8 sign classes
+        std::cout << "[INFO] Loading car model (yolov8n_quant.onnx)..." << std::endl;
+        YOLOModel carModel(env, L"yolov8n_quant.onnx", 80);     // COCO: 80 classes
 
-        std::cout << "[INFO] Loading speed model (best (3).onnx)..." << std::endl;
-        YOLOModel speedModel("best (3).onnx", 14, 960);    // 14 speed limit classes, 960x960 input
+        std::cout << "[INFO] Loading sign model (best_quant.onnx)..." << std::endl;
+        YOLOModel signModel(env, L"best_quant.onnx", 8);          // 8 sign classes
+
+        std::cout << "[INFO] Loading speed model (best (3)_quant.onnx)..." << std::endl;
+        YOLOModel speedModel(env, L"best (3)_quant.onnx", 14, 960);    // 14 speed limit classes, 960x960 input
 
         // Shared state for MJPEG streaming
         PipelineState state;
@@ -536,8 +591,8 @@ int main() {
 
         state.running = false;
         processingThread.join();
-    } catch (const cv::Exception& e) {
-        std::cerr << "OpenCV Exception: " << e.what() << std::endl;
+    } catch (const Ort::Exception& e) {
+        std::cerr << "ONNX Runtime Error: " << e.what() << std::endl;
         return 1;
     } catch (const std::exception& e) {
         std::cerr << "Standard Exception: " << e.what() << std::endl;
