@@ -50,7 +50,7 @@ WORKDIR /app
 # Copy ONNX Runtime shared library
 COPY --from=builder /opt/onnxruntime/lib/libonnxruntime.so.1.18.0 /usr/local/lib/
 COPY --from=builder /opt/onnxruntime/lib/libonnxruntime.so /usr/local/lib/
-RUN ldconfig
+ENV LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
 
 # Copy compiled executable
 COPY --from=builder /app/jetson_pipeline/build/traffic_detection /app/
