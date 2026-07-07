@@ -10,6 +10,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     cmake \
     wget \
+    ca-certificates \
     pkg-config \
     libopencv-dev \
     && rm -rf /var/lib/apt/lists/*
@@ -17,7 +18,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 # Download pre-compiled ONNX Runtime for ARM64 CPU
-RUN wget -q https://github.com/microsoft/onnxruntime/releases/download/v1.18.0/onnxruntime-linux-aarch64-1.18.0.tgz -O onnxruntime.tgz && \
+RUN wget --no-check-certificate -q https://github.com/microsoft/onnxruntime/releases/download/v1.18.0/onnxruntime-linux-aarch64-1.18.0.tgz -O onnxruntime.tgz && \
     tar -xzf onnxruntime.tgz -C /opt && \
     rm onnxruntime.tgz && \
     mv /opt/onnxruntime-linux-aarch64-1.18.0 /opt/onnxruntime
