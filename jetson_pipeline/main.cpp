@@ -8,6 +8,7 @@
 #include <cmath>
 #include <mutex>
 #include <sstream>
+#include <future>
 
 #include <opencv2/opencv.hpp>
 #include <opencv2/dnn.hpp>
@@ -63,7 +64,7 @@ public:
         : numClasses_(numClasses), inputSize_(inputSize) {
         
         Ort::SessionOptions opts;
-        opts.SetIntraOpNumThreads(12); // Use 12 threads for Jetson Orin CPU max performance
+        opts.SetIntraOpNumThreads(4); // Use 4 threads per model for parallel execution
         opts.SetInterOpNumThreads(1);
         opts.SetExecutionMode(ExecutionMode::ORT_SEQUENTIAL);
         opts.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
@@ -363,11 +364,23 @@ void videoProcessingLoop(
         }
 
         cv::resize(frame, frame, cv::Size(width, height));
+        if (frame.empty()) break;
 
-        // Run inference on all 3 models (GPU)
-        auto carDets = carModel.detect(frame, CAR_CONF_THRESHOLD);
-        auto signDets = signModel.detect(frame, SIGN_CONF_THRESHOLD);
-        auto speedDets = speedModel.detect(frame, SPEED_CONF_THRESHOLD);
+        // Run inference in parallel threads
+        auto futureCar = std::async(std::launch::async, [&carModel, &frame]() {
+            return carModel.detect(frame, CAR_CONF_THRESHOLD);
+        });
+        auto futureSign = std::async(std::launch::async, [&signModel, &frame]() {
+            return signModel.detect(frame, SIGN_CONF_THRESHOLD);
+        });
+        auto futureSpeed = std::async(std::launch::async, [&speedModel, &frame]() {
+            return speedModel.detect(frame, SPEED_CONF_THRESHOLD);
+        });
+
+        // Wait for all to finish and get results
+        auto carDets = futureCar.get();
+        auto signDets = futureSign.get();
+        auto speedDets = futureSpeed.get();
 
         bool carAheadDetected = false;
         bool redThisFrame = false, greenThisFrame = false, yellowThisFrame = false;
