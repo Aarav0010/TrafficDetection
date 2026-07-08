@@ -5,6 +5,19 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Traffic Sign Detection</title>
     <style>
+        .source-btn {
+            background-color: #e21b22; /* Tech Mahindra red */
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            font-size: 18px;
+            border-radius: 5px;
+            cursor: pointer;
+            transition: 0.3s;
+        }
+        .source-btn:hover {
+            background-color: #b5151b;
+        }
         #timer {
             text-align: center;
             font-size: xx-large;
@@ -21,7 +34,11 @@
         <img src="/image.png" style="height: 15%;width: 50%;position: relative; display:block; margin:auto; margin-bottom:20px;"> <!-- Replace "your_image_url.jpg" with your image URL or path -->
     </div>
     <img src="/video_feed" width="640" height="480" style="display:block; margin:auto;">
-    <div id="timer" ><span id="countdown">01:00</span></div>
+    <div style="display: flex; justify-content: center; align-items: center; margin-top: 10px;">
+        <button class="source-btn" onclick="setSource('camera')">📷 Camera</button>
+        <div id="timer" style="display: inline-block; padding: 0 20px; margin: 0;"><span id="countdown">00:00</span></div>
+        <button class="source-btn" onclick="setSource('video')">🎬 Video</button>
+    </div>
     <script>
         function startTimer(display) {
             setInterval(function () {
@@ -52,6 +69,14 @@
             var display = document.getElementById("countdown");
             startTimer(display);
         };
+
+        function setSource(type) {
+            fetch('/set_source', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body: 'type=' + type
+            });
+        }
     </script>
 </body>
 </html>

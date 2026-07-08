@@ -36,23 +36,17 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Build and push the ARM64 image
-      - name: Build and push Jetson Docker image
+      # Build the ARM64 image and export as tarball
+      - name: Build and export Jetson Docker image
         uses: docker/build-push-action@v5
         with:
           context: .
           file: ./Dockerfile.jetson
           platforms: linux/arm64
-          push: true
-          tags: ghcr.io/aarav0010/trafficdetection/traffic-detection-jetson:latest
+          tags: traffic-detection-jetson:latest
+          outputs: type=docker,dest=traffic-detection-jetson.tar
           cache-from: type=gha
           cache-to: type=gha,mode=max
-
-      # Export the Docker image as a tar file for offline transfer
-      - name: Save Docker image to tar
-        run: |
-          docker pull --platform linux/arm64 ghcr.io/aarav0010/trafficdetection/traffic-detection-jetson:latest
-          docker save ghcr.io/aarav0010/trafficdetection/traffic-detection-jetson:latest > traffic-detection-jetson.tar
 
       # Upload the tar file as a GitHub artifact
       - name: Upload Docker image artifact

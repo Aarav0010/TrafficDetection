@@ -63,4 +63,4 @@ EXPOSE 5000
 
 # Run the executable, ensuring we execute in the correct working directory
 WORKDIR /app
-CMD ["./jetson_pipeline/build/traffic_detection"]
+CMD ["./traffic_detection"]

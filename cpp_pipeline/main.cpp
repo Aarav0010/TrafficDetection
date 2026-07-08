@@ -63,13 +63,16 @@ public:
         : numClasses_(numClasses), inputSize_(inputSize) {
         
         Ort::SessionOptions opts;
-        opts.SetIntraOpNumThreads(1);
+        opts.SetIntraOpNumThreads(8); // Use 8 threads for CPU inference
+        opts.SetInterOpNumThreads(2);
+        opts.SetExecutionMode(ExecutionMode::ORT_SEQUENTIAL);
         opts.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
 
-        // Add CUDA provider for GPU
-        OrtCUDAProviderOptions cuda_opts;
-        cuda_opts.device_id = 0;
-        opts.AppendExecutionProvider_CUDA(cuda_opts);
+        OrtCUDAProviderOptions cuda_options;
+        cuda_options.device_id = 0;
+        opts.AppendExecutionProvider_CUDA(cuda_options);
+
+        // CPU ONLY - No CUDA provider added
 
         session_ = std::make_unique<Ort::Session>(env, modelPath.c_str(), opts);
         
@@ -274,6 +277,8 @@ struct PipelineState {
     std::vector<uchar> currentJpeg;
     double currentVideoTimeSec = 0.0;
     bool running = true;
+    bool switchSource = false;
+    std::string newSourceType = "";
 };
 
 // ============================================================================
@@ -327,15 +332,34 @@ void videoProcessingLoop(
     std::string currentSpeedLimit;
 
     while (state.running) {
+        {
+            std::lock_guard<std::mutex> lock(state.mtx);
+            if (state.switchSource) {
+                cap.release();
+                if (state.newSourceType == "camera") {
+                    cap.open(0);
+                    source = "LIVE";
+                    std::cout << "[INFO] Switched to LIVE camera" << std::endl;
+                } else {
+                    cap.open("edited_ultimate_video.mp4");
+                    source = "VIDEO";
+                    std::cout << "[INFO] Switched to VIDEO file" << std::endl;
+                }
+                state.switchSource = false;
+            }
+        }
+
         cv::Mat frame;
         bool success = cap.read(frame);
 
         if (!success) {
             if (source == "VIDEO") {
+                // Loop video
                 cap.set(cv::CAP_PROP_POS_FRAMES, 0);
                 redCount = greenCount = yellowCount = 0;
                 continue;
             } else {
+                std::cerr << "[ERROR] Could not read frame from camera!" << std::endl;
                 break;
             }
         }
@@ -360,6 +384,10 @@ void videoProcessingLoop(
 
             if (pointInPolygon(lanePts, cv::Point(cx, cy)) && carArea > (int)(frameArea * 0.003)) {
                 carAheadDetected = true;
+                // Draw orange bounding box for the car ahead
+                cv::rectangle(frame, det.box, cv::Scalar(0, 165, 255), 2);
+                cv::putText(frame, "CAR AHEAD", cv::Point(det.box.x, det.box.y - 10),
+                            cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(0, 165, 255), 2);
             }
         }
 
@@ -558,6 +586,16 @@ int main() {
             res.set_content(std::to_string(current_time), "text/plain");
         });
 
+        svr.Post("/set_source", [&state](const httplib::Request& req, httplib::Response& res) {
+            if (req.has_param("type")) {
+                std::string type = req.get_param_value("type");
+                std::lock_guard<std::mutex> lock(state.mtx);
+                state.switchSource = true;
+                state.newSourceType = type;
+            }
+            res.set_content("OK", "text/plain");
+        });
+
         svr.Get("/video_feed", [&state](const httplib::Request&, httplib::Response& res) {
             res.set_chunked_content_provider(
                 "multipart/x-mixed-replace; boundary=frame",
@@ -569,19 +607,15 @@ int main() {
                             jpeg = state.currentJpeg;
                         }
 
-                        if (jpeg.empty()) {
-                            std::this_thread::sleep_for(std::chrono::milliseconds(10));
-                            continue;
+                        if (!jpeg.empty()) {
+                            std::string header = "--frame\r\nContent-Type: image/jpeg\r\n\r\n";
+                            if (!sink.write(header.data(), header.size())) break;
+                            if (!sink.write((const char*)jpeg.data(), jpeg.size())) break;
+                            if (!sink.write("\r\n", 2)) break;
                         }
-
-                        std::string header = "--frame\r\nContent-Type: image/jpeg\r\n\r\n";
-                        if (!sink.write(header.c_str(), header.size())) return false;
-                        if (!sink.write(reinterpret_cast<const char*>(jpeg.data()), jpeg.size())) return false;
-                        if (!sink.write("\r\n", 2)) return false;
-
-                        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                        std::this_thread::sleep_for(std::chrono::milliseconds(30)); // Limit to ~33fps
                     }
-                    return false;
+                    return true;
                 },
                 [](bool /*success*/) {}
             );
