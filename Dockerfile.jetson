@@ -59,7 +59,7 @@ COPY --from=builder /app/jetson_pipeline/build/traffic_detection /app/
 # NOTE: We are copying the *_quant.onnx models to fit within the storage limit
 COPY ["*_quant.onnx", "index.html", "image.png", "edited_ultimate_video.mp4", "/app/"]
 
-EXPOSE 5000
+EXPOSE 5004 43000
 
 # Run the executable, ensuring we execute in the correct working directory
 WORKDIR /app

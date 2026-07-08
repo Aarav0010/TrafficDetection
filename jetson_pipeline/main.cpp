@@ -278,6 +278,9 @@ struct PipelineState {
     bool running = true;
     bool switchSource = false;
     std::string newSourceType = "";
+    
+    std::string lastStatusMsg = "";
+    std::vector<std::string> statusLogs;
 };
 
 // ============================================================================
@@ -336,9 +339,14 @@ void videoProcessingLoop(
             if (state.switchSource) {
                 cap.release();
                 if (state.newSourceType == "camera") {
-                    cap.open(0);
-                    source = "LIVE";
-                    std::cout << "[INFO] Switched to LIVE camera" << std::endl;
+                    if (cap.open(0) && cap.isOpened()) {
+                        source = "LIVE";
+                        std::cout << "[INFO] Switched to LIVE camera" << std::endl;
+                    } else {
+                        std::cout << "[WARNING] Camera unavailable! Falling back to video." << std::endl;
+                        cap.open("edited_ultimate_video.mp4");
+                        source = "VIDEO";
+                    }
                 } else {
                     cap.open("edited_ultimate_video.mp4");
                     source = "VIDEO";
@@ -491,6 +499,25 @@ void videoProcessingLoop(
             statusColor = cv::Scalar(0, 165, 255);
         }
 
+        // Status log tracking
+        {
+            std::lock_guard<std::mutex> lock(state.mtx);
+            if (statusMsg != state.lastStatusMsg && !statusMsg.empty()) {
+                auto now = std::chrono::system_clock::now();
+                auto time_t_now = std::chrono::system_clock::to_time_t(now);
+                std::stringstream ss;
+                ss << std::put_time(std::localtime(&time_t_now), "[%H:%M:%S] ");
+                std::string logLine = ss.str() + statusMsg;
+                
+                state.statusLogs.push_back(logLine);
+                if (state.statusLogs.size() > 100) {
+                    state.statusLogs.erase(state.statusLogs.begin());
+                }
+                state.lastStatusMsg = statusMsg;
+                std::cout << logLine << std::endl;
+            }
+        }
+
         // Scale back up for display
         int dispHeight = (int)(height * ((float)DISP_WIDTH / width));
         cv::resize(frame, frame, cv::Size(DISP_WIDTH, dispHeight));
@@ -563,9 +590,30 @@ int main() {
         std::thread processingThread(videoProcessingLoop,
             std::ref(carModel), std::ref(signModel), std::ref(speedModel), std::ref(state));
 
+        // Create log server on port 43000
+        std::thread logServerThread([&state]() {
+            httplib::Server log_svr;
+            log_svr.Get("/", [&state](const httplib::Request&, httplib::Response& res) {
+                std::string content = "<html><head><title>Traffic Status Logs</title>";
+                content += "<meta http-equiv='refresh' content='2'>"; // auto refresh every 2 sec
+                content += "<style>body{font-family:monospace; background:#111; color:#0f0; padding:20px;}</style></head><body>";
+                content += "<h2>Traffic Detection Live Logs</h2><hr/>";
+                
+                std::lock_guard<std::mutex> lock(state.mtx);
+                for (auto it = state.statusLogs.rbegin(); it != state.statusLogs.rend(); ++it) {
+                    content += *it + "<br/>";
+                }
+                
+                content += "</body></html>";
+                res.set_content(content, "text/html");
+            });
+            std::cout << "[INFO] Log Server starting on http://0.0.0.0:43000" << std::endl;
+            log_svr.listen("0.0.0.0", 43000);
+        });
+
         // HTTP Server
         httplib::Server svr;
-
+        
         svr.Get("/", [](const httplib::Request&, httplib::Response& res) {
             std::ifstream ifs("index.html");
             if (ifs.good()) {
@@ -632,11 +680,12 @@ int main() {
             );
         });
 
-        std::cout << "[INFO] Server starting on http://0.0.0.0:5000" << std::endl;
-        svr.listen("0.0.0.0", 5000);
+        std::cout << "[INFO] Server starting on http://0.0.0.0:5004" << std::endl;
+        svr.listen("0.0.0.0", 5004);
 
         state.running = false;
         processingThread.join();
+        logServerThread.join();
     } catch (const Ort::Exception& e) {
         std::cerr << "ONNX Runtime Error: " << e.what() << std::endl;
         return 1;
