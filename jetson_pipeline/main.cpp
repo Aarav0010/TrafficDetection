@@ -64,7 +64,19 @@ public:
         : numClasses_(numClasses), inputSize_(inputSize) {
         
         Ort::SessionOptions opts;
-        opts.SetIntraOpNumThreads(4); // Use 4 threads per model for parallel execution
+        
+        // Try enabling CUDA Execution Provider (GPU)
+        try {
+            OrtCUDAProviderOptions cuda_options;
+            cuda_options.device_id = 0;
+            // Additional optimizations could be set here
+            opts.AppendExecutionProvider_CUDA(cuda_options);
+            std::cout << "[INFO] CUDA Execution Provider enabled for model." << std::endl;
+        } catch (const std::exception& e) {
+            std::cout << "[WARNING] Could not enable CUDA: " << e.what() << ". Falling back to CPU." << std::endl;
+        }
+
+        opts.SetIntraOpNumThreads(4); // Use 4 threads for CPU fallback operations
         opts.SetInterOpNumThreads(1);
         opts.SetExecutionMode(ExecutionMode::ORT_SEQUENTIAL);
         opts.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
@@ -574,14 +586,14 @@ int main() {
         // Initialize ONNX Runtime
         Ort::Env env(ORT_LOGGING_LEVEL_WARNING, "TrafficDetection");
 
-        std::cout << "[INFO] Loading car model (yolov8n_quant.onnx)..." << std::endl;
-        YOLOModel carModel(env, "yolov8n_quant.onnx", 80);     // COCO: 80 classes
+        std::cout << "[INFO] Loading car model (yolov8n.onnx)..." << std::endl;
+        YOLOModel carModel(env, "yolov8n.onnx", 80);     // COCO: 80 classes
 
-        std::cout << "[INFO] Loading sign model (best_quant.onnx)..." << std::endl;
-        YOLOModel signModel(env, "best_quant.onnx", 8);          // 8 sign classes
+        std::cout << "[INFO] Loading sign model (best.onnx)..." << std::endl;
+        YOLOModel signModel(env, "best.onnx", 8);          // 8 sign classes
 
-        std::cout << "[INFO] Loading speed model (best (3)_quant.onnx)..." << std::endl;
-        YOLOModel speedModel(env, "best (3)_quant.onnx", 14, 960);    // 14 speed limit classes, 960x960 input
+        std::cout << "[INFO] Loading speed model (best (3).onnx)..." << std::endl;
+        YOLOModel speedModel(env, "best (3).onnx", 14, 960);    // 14 speed limit classes, 960x960 input
 
         // Shared state for MJPEG streaming
         PipelineState state;

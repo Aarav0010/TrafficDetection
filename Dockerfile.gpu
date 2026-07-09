@@ -1,0 +1,51 @@
+# Builder stage: use dustynv/onnxruntime which has Jetpack 6 + ONNX Runtime GPU pre-installed
+FROM dustynv/onnxruntime:r36.2.0 AS builder
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential cmake libopencv-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY jetson_pipeline/ /app/jetson_pipeline/
+WORKDIR /app/jetson_pipeline/build
+RUN cmake .. && make -j$(nproc)
+
+# Final runtime stage: minimal Ubuntu image with NVIDIA runtime hooks
+FROM arm64v8/ubuntu:22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libopencv-core4.5d \
+    libopencv-imgproc4.5d \
+    libopencv-dnn4.5d \
+    libopencv-videoio4.5d \
+    libopencv-highgui4.5d \
+    libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# NVIDIA Container Toolkit requirements for GPU passthrough
+ENV NVIDIA_VISIBLE_DEVICES=all
+ENV NVIDIA_DRIVER_CAPABILITIES=compute,video,utility
+
+WORKDIR /app
+
+# Extract ONNX Runtime libraries from the builder image.
+# dustynv places them in standard locations. We copy the core libraries required.
+COPY --from=builder /usr/local/lib/libonnxruntime.so* /usr/local/lib/
+COPY --from=builder /usr/local/lib/libonnxruntime_providers_cuda.so /usr/local/lib/ || true
+COPY --from=builder /usr/local/lib/libonnxruntime_providers_shared.so /usr/local/lib/ || true
+COPY --from=builder /usr/local/lib/libonnxruntime_providers_tensorrt.so /usr/local/lib/ || true
+
+ENV LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
+
+# Copy compiled executable
+COPY --from=builder /app/jetson_pipeline/build/traffic_detection /app/
+
+# Copy the NON-quantized models for maximum GPU accuracy and speed
+COPY ["yolov8n.onnx", "best.onnx", "best (3).onnx", "index.html", "image.png", "edited_ultimate_video.mp4", "/app/"]
+
+EXPOSE 5004 43000
+
+WORKDIR /app
+CMD ["./traffic_detection"]
