@@ -3,10 +3,23 @@ FROM dustynv/onnxruntime:r36.2.0 AS builder
 
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential cmake libopencv-dev \
+    build-essential cmake libopencv-dev wget ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
+
+# Download ONNX Runtime CPU release to get the C++ headers structure
+RUN wget --no-check-certificate -q https://github.com/microsoft/onnxruntime/releases/download/v1.18.0/onnxruntime-linux-aarch64-1.18.0.tgz -O onnxruntime.tgz && \
+    tar -xzf onnxruntime.tgz -C /opt && \
+    rm onnxruntime.tgz && \
+    mv /opt/onnxruntime-linux-aarch64-1.18.0 /opt/onnxruntime
+
+# The dustynv image contains the GPU-compiled libonnxruntime.so.
+# We will copy it over the CPU ones so CMake links against the GPU libraries.
+RUN find /usr/local/lib /usr/lib -name "libonnxruntime*.so*" -exec cp -v {} /opt/onnxruntime/lib/ \; || true
+
+ENV ONNXRUNTIME_DIR=/opt/onnxruntime
+
 COPY jetson_pipeline/ /app/jetson_pipeline/
 WORKDIR /app/jetson_pipeline/build
 RUN cmake .. && make -j$(nproc)
@@ -30,12 +43,8 @@ ENV NVIDIA_DRIVER_CAPABILITIES=compute,video,utility
 
 WORKDIR /app
 
-# Extract ONNX Runtime libraries from the builder image.
-# dustynv places them in standard locations. We copy the core libraries required.
-COPY --from=builder /usr/local/lib/libonnxruntime.so* /usr/local/lib/
-COPY --from=builder /usr/local/lib/libonnxruntime_providers_cuda.so /usr/local/lib/ || true
-COPY --from=builder /usr/local/lib/libonnxruntime_providers_shared.so /usr/local/lib/ || true
-COPY --from=builder /usr/local/lib/libonnxruntime_providers_tensorrt.so /usr/local/lib/ || true
+# Copy the GPU ONNX Runtime libraries from our prepared builder directory
+COPY --from=builder /opt/onnxruntime/lib/libonnxruntime*.so* /usr/local/lib/
 
 ENV LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
 
