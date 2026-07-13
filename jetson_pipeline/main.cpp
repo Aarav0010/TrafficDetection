@@ -9,6 +9,7 @@
 #include <mutex>
 #include <sstream>
 #include <future>
+#include <iomanip>
 
 #include <opencv2/opencv.hpp>
 #include <opencv2/dnn.hpp>
@@ -288,63 +289,9 @@ struct PipelineState {
 
 // ============================================================================
 // Main video processing loop (runs in its own thread)
+// Single-threaded: inference + drawing on SAME frame = perfectly synced boxes
+// Skips video frames to maintain real-time pace
 // ============================================================================
-
-void inferenceLoop(
-    YOLOModel& carModel,
-    YOLOModel& signModel,
-    YOLOModel& speedModel,
-    PipelineState& state,
-    cv::Mat* currentRawFrame,
-    std::mutex* frameMtx,
-    std::vector<Detection>* carDets,
-    std::vector<Detection>* signDets,
-    std::vector<Detection>* speedDets,
-    std::mutex* detsMtx,
-    int frameArea
-) {
-    while (state.running) {
-        cv::Mat frame;
-        {
-            std::lock_guard<std::mutex> lock(*frameMtx);
-            if (currentRawFrame->empty()) {
-                continue;
-            }
-            frame = currentRawFrame->clone();
-        }
-
-        auto futureCar = std::async(std::launch::async, [&carModel, &frame]() {
-            return carModel.detect(frame, CAR_CONF_THRESHOLD);
-        });
-        auto futureSign = std::async(std::launch::async, [&signModel, &frame]() {
-            return signModel.detect(frame, 0.25f);
-        });
-        auto futureSpeed = std::async(std::launch::async, [&speedModel, &frame]() {
-            return speedModel.detect(frame, SPEED_CONF_THRESHOLD);
-        });
-
-        auto cDets = futureCar.get();
-        auto sDets = futureSign.get();
-        auto spDets = futureSpeed.get();
-
-        std::vector<Detection> filteredSigns;
-        for (auto& det : sDets) {
-            float area = det.box.width * det.box.height;
-            if (area > (frameArea * 0.05f)) continue; // ignore large balloons/boards
-            filteredSigns.push_back(det);
-        }
-
-        {
-            std::lock_guard<std::mutex> lock(*detsMtx);
-            *carDets = cDets;
-            *signDets = filteredSigns;
-            *speedDets = spDets;
-        }
-        
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    }
-}
-
 void videoProcessingLoop(
     YOLOModel& carModel,
     YOLOModel& signModel,
@@ -374,11 +321,15 @@ void videoProcessingLoop(
 
     int origWidth = (int)cap.get(cv::CAP_PROP_FRAME_WIDTH);
     int origHeight = (int)cap.get(cv::CAP_PROP_FRAME_HEIGHT);
+    double videoFps = cap.get(cv::CAP_PROP_FPS);
+    if (videoFps <= 0) videoFps = 30.0;
     int width = 640;
     int height = (int)(origHeight * ((float)width / origWidth));
     int frameArea = width * height;
 
-    std::cout << "[INFO] Resolution: " << width << "x" << height << " | Source: " << source << std::endl;
+    std::cout << "[INFO] Resolution: " << width << "x" << height 
+              << " | Source: " << source 
+              << " | Video FPS: " << videoFps << std::endl;
 
     // Lane polygon (same as Python)
     std::vector<cv::Point> lanePts = {
@@ -391,19 +342,16 @@ void videoProcessingLoop(
     // Temporal smoothing
     int redCount = 0, greenCount = 0, yellowCount = 0;
     std::string currentSpeedLimit;
-    
-    cv::Mat currentRawFrame;
-    std::mutex frameMtx;
-    std::vector<Detection> carDets, signDets, speedDets;
-    std::mutex detsMtx;
 
-    std::thread infThread(inferenceLoop, 
-        std::ref(carModel), std::ref(signModel), std::ref(speedModel), std::ref(state),
-        &currentRawFrame, &frameMtx, &carDets, &signDets, &speedDets, &detsMtx, frameArea);
+    // FPS measurement
+    int fpsCounter = 0;
+    auto fpsStart = std::chrono::steady_clock::now();
+    double currentFps = 0.0;
 
     while (state.running) {
         auto frameStart = std::chrono::steady_clock::now();
 
+        // Check for source switch
         {
             std::lock_guard<std::mutex> lock(state.mtx);
             if (state.switchSource) {
@@ -426,6 +374,7 @@ void videoProcessingLoop(
             }
         }
 
+        // Read frame
         cv::Mat frame;
         bool success = cap.read(frame);
 
@@ -443,24 +392,28 @@ void videoProcessingLoop(
         cv::resize(frame, frame, cv::Size(width, height));
         if (frame.empty()) break;
 
-        {
-            std::lock_guard<std::mutex> lock(frameMtx);
-            currentRawFrame = frame.clone();
-        }
+        // ---- RUN INFERENCE ON THIS EXACT FRAME ----
+        // All 3 models run in parallel threads on the SAME frame
+        auto futureCar = std::async(std::launch::async, [&carModel, &frame]() {
+            return carModel.detect(frame, CAR_CONF_THRESHOLD);
+        });
+        auto futureSign = std::async(std::launch::async, [&signModel, &frame]() {
+            return signModel.detect(frame, 0.25f);
+        });
+        auto futureSpeed = std::async(std::launch::async, [&speedModel, &frame]() {
+            return speedModel.detect(frame, SPEED_CONF_THRESHOLD);
+        });
 
-        std::vector<Detection> currentCarDets, currentSignDets, currentSpeedDets;
-        {
-            std::lock_guard<std::mutex> lock(detsMtx);
-            currentCarDets = carDets;
-            currentSignDets = signDets;
-            currentSpeedDets = speedDets;
-        }
+        auto carDets = futureCar.get();
+        auto signDets = futureSign.get();
+        auto speedDets = futureSpeed.get();
 
+        // ---- DRAW ON THIS SAME FRAME (boxes always synced) ----
         bool carAheadDetected = false;
         bool redThisFrame = false, greenThisFrame = false, yellowThisFrame = false;
 
-        // 1. Filter Cars
-        for (auto& det : currentCarDets) {
+        // 1. Filter Cars (lane detection) - only COCO class 2 (car)
+        for (auto& det : carDets) {
             if (det.classId != COCO_CAR_CLASS) continue;
             int cx = det.box.x + det.box.width / 2;
             int cy = det.box.y + det.box.height;
@@ -474,7 +427,7 @@ void videoProcessingLoop(
         }
 
         // 2. Filter Speed Limits
-        for (auto& det : currentSpeedDets) {
+        for (auto& det : speedDets) {
             float aspect = (float)det.box.height / std::max(det.box.width, 1);
             if (det.confidence > SPEED_CONF_THRESHOLD && aspect >= 1.0f && aspect <= 1.8f) {
                 auto it = SPEED_LIMIT_NAMES.find(det.classId);
@@ -490,14 +443,18 @@ void videoProcessingLoop(
         }
 
         // 3. Filter Traffic Signs & Lights
-        for (auto& det : currentSignDets) {
+        for (auto& det : signDets) {
             int cls = det.classId;
-            float conf = det.confidence;
 
             if (cls != TRAFFIC_LIGHT_RED && cls != TRAFFIC_LIGHT_GREEN && cls != TRAFFIC_LIGHT_YELLOW) {
                 continue;
             }
 
+            // Area filter: ignore large false positives (balloons, boards)
+            float detArea = det.box.width * det.box.height;
+            if (detArea > (frameArea * 0.05f)) continue;
+
+            // Dark pixel analysis (validates it looks like a real traffic light housing)
             if (!isRealTrafficLight(frame, det.box.x, det.box.y,
                     det.box.x + det.box.width, det.box.y + det.box.height)) {
                 continue;
@@ -572,6 +529,17 @@ void videoProcessingLoop(
             }
         }
 
+        // FPS measurement
+        fpsCounter++;
+        if (fpsCounter >= 30) {
+            auto fpsEnd = std::chrono::steady_clock::now();
+            double elapsed_sec = std::chrono::duration<double>(fpsEnd - fpsStart).count();
+            currentFps = fpsCounter / elapsed_sec;
+            std::cout << "[FPS] " << std::fixed << std::setprecision(1) << currentFps << " fps" << std::endl;
+            fpsCounter = 0;
+            fpsStart = fpsEnd;
+        }
+
         // Scale back up for display
         int dispHeight = (int)(height * ((float)DISP_WIDTH / width));
         cv::resize(frame, frame, cv::Size(DISP_WIDTH, dispHeight));
@@ -593,6 +561,13 @@ void videoProcessingLoop(
         cv::putText(frame, speedText, cv::Point(20, 80),
             cv::FONT_HERSHEY_SIMPLEX, 0.9, cv::Scalar(255, 255, 255), 2, cv::LINE_AA);
 
+        // Show FPS on screen
+        std::stringstream fpsStr;
+        fpsStr << std::fixed << std::setprecision(1) << currentFps << " FPS";
+        cv::putText(frame, fpsStr.str(), cv::Point(DISP_WIDTH - 150, dispHeight - 20),
+            cv::FONT_HERSHEY_SIMPLEX, 0.7, cv::Scalar(0, 255, 255), 2, cv::LINE_AA);
+
+        // Encode to JPEG
         std::vector<uchar> jpegBuf;
         std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, 75};
         cv::imencode(".jpg", frame, jpegBuf, params);
@@ -606,10 +581,21 @@ void videoProcessingLoop(
             state.currentVideoTimeSec = videoTimeSec;
         }
 
+        // ---- SKIP VIDEO FRAMES to maintain real-time pace ----
+        // If inference took e.g. 200ms and video is 30fps (33ms/frame),
+        // we need to skip ~5 frames to stay in sync with real time
         auto frameEnd = std::chrono::steady_clock::now();
-        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(frameEnd - frameStart).count();
-        if (source == "VIDEO" && elapsed < 33) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(33 - elapsed));
+        auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(frameEnd - frameStart).count();
+        
+        if (source == "VIDEO") {
+            double frameDurationMs = 1000.0 / videoFps;
+            int framesToSkip = (int)(elapsedMs / frameDurationMs);
+            if (framesToSkip > 0) {
+                // Seek forward to stay in real-time sync
+                for (int i = 0; i < framesToSkip && i < 10; i++) {
+                    cap.grab(); // grab without decode = fast skip
+                }
+            }
         }
     }
 
