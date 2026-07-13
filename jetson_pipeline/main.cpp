@@ -289,6 +289,62 @@ struct PipelineState {
 // ============================================================================
 // Main video processing loop (runs in its own thread)
 // ============================================================================
+
+void inferenceLoop(
+    YOLOModel& carModel,
+    YOLOModel& signModel,
+    YOLOModel& speedModel,
+    PipelineState& state,
+    cv::Mat* currentRawFrame,
+    std::mutex* frameMtx,
+    std::vector<Detection>* carDets,
+    std::vector<Detection>* signDets,
+    std::vector<Detection>* speedDets,
+    std::mutex* detsMtx,
+    int frameArea
+) {
+    while (state.running) {
+        cv::Mat frame;
+        {
+            std::lock_guard<std::mutex> lock(*frameMtx);
+            if (currentRawFrame->empty()) {
+                continue;
+            }
+            frame = currentRawFrame->clone();
+        }
+
+        auto futureCar = std::async(std::launch::async, [&carModel, &frame]() {
+            return carModel.detect(frame, CAR_CONF_THRESHOLD);
+        });
+        auto futureSign = std::async(std::launch::async, [&signModel, &frame]() {
+            return signModel.detect(frame, 0.25f);
+        });
+        auto futureSpeed = std::async(std::launch::async, [&speedModel, &frame]() {
+            return speedModel.detect(frame, SPEED_CONF_THRESHOLD);
+        });
+
+        auto cDets = futureCar.get();
+        auto sDets = futureSign.get();
+        auto spDets = futureSpeed.get();
+
+        std::vector<Detection> filteredSigns;
+        for (auto& det : sDets) {
+            float area = det.box.width * det.box.height;
+            if (area > (frameArea * 0.05f)) continue; // ignore large balloons/boards
+            filteredSigns.push_back(det);
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(*detsMtx);
+            *carDets = cDets;
+            *signDets = filteredSigns;
+            *speedDets = spDets;
+        }
+        
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+}
+
 void videoProcessingLoop(
     YOLOModel& carModel,
     YOLOModel& signModel,
@@ -336,10 +392,18 @@ void videoProcessingLoop(
     int redCount = 0, greenCount = 0, yellowCount = 0;
     std::string currentSpeedLimit;
     
-    int frameCount = 0;
-    std::vector<Detection> lastCarDets, lastSignDets, lastSpeedDets;
+    cv::Mat currentRawFrame;
+    std::mutex frameMtx;
+    std::vector<Detection> carDets, signDets, speedDets;
+    std::mutex detsMtx;
+
+    std::thread infThread(inferenceLoop, 
+        std::ref(carModel), std::ref(signModel), std::ref(speedModel), std::ref(state),
+        &currentRawFrame, &frameMtx, &carDets, &signDets, &speedDets, &detsMtx, frameArea);
 
     while (state.running) {
+        auto frameStart = std::chrono::steady_clock::now();
+
         {
             std::lock_guard<std::mutex> lock(state.mtx);
             if (state.switchSource) {
@@ -367,7 +431,6 @@ void videoProcessingLoop(
 
         if (!success) {
             if (source == "VIDEO") {
-                // Loop video
                 cap.set(cv::CAP_PROP_POS_FRAMES, 0);
                 redCount = greenCount = yellowCount = 0;
                 continue;
@@ -380,71 +443,46 @@ void videoProcessingLoop(
         cv::resize(frame, frame, cv::Size(width, height));
         if (frame.empty()) break;
 
-        // Frame skipping logic: process every 2nd frame
-        frameCount++;
-        bool skipInference = (frameCount % 2 == 0);
+        {
+            std::lock_guard<std::mutex> lock(frameMtx);
+            currentRawFrame = frame.clone();
+        }
 
-        std::vector<Detection> carDets, signDets, speedDets;
-
-        if (!skipInference) {
-            // Run inference in parallel threads
-            auto futureCar = std::async(std::launch::async, [&carModel, &frame]() {
-                return carModel.detect(frame, CAR_CONF_THRESHOLD);
-            });
-            auto futureSign = std::async(std::launch::async, [&signModel, &frame]() {
-                return signModel.detect(frame, std::max(0.40f, SIGN_CONF_THRESHOLD)); // higher conf for traffic lights
-            });
-            auto futureSpeed = std::async(std::launch::async, [&speedModel, &frame]() {
-                return speedModel.detect(frame, SPEED_CONF_THRESHOLD);
-            });
-
-            carDets = futureCar.get();
-            signDets = futureSign.get();
-            speedDets = futureSpeed.get();
-
-            lastCarDets = carDets;
-            lastSignDets = signDets;
-            lastSpeedDets = speedDets;
-        } else {
-            carDets = lastCarDets;
-            signDets = lastSignDets;
-            speedDets = lastSpeedDets;
+        std::vector<Detection> currentCarDets, currentSignDets, currentSpeedDets;
+        {
+            std::lock_guard<std::mutex> lock(detsMtx);
+            currentCarDets = carDets;
+            currentSignDets = signDets;
+            currentSpeedDets = speedDets;
         }
 
         bool carAheadDetected = false;
         bool redThisFrame = false, greenThisFrame = false, yellowThisFrame = false;
 
-        // 1. Filter Cars (lane detection) - only COCO class 2 (car)
-        for (auto& det : carDets) {
+        // 1. Filter Cars
+        for (auto& det : currentCarDets) {
             if (det.classId != COCO_CAR_CLASS) continue;
-
             int cx = det.box.x + det.box.width / 2;
             int cy = det.box.y + det.box.height;
             int carArea = det.box.width * det.box.height;
-
             if (pointInPolygon(lanePts, cv::Point(cx, cy)) && carArea > (int)(frameArea * 0.003)) {
                 carAheadDetected = true;
-                // Draw orange bounding box for the car ahead
                 cv::rectangle(frame, det.box, cv::Scalar(0, 165, 255), 2);
                 cv::putText(frame, "CAR AHEAD", cv::Point(det.box.x, det.box.y - 10),
                             cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(0, 165, 255), 2);
             }
         }
 
-        // 2. Filter Speed Limits (speed_model)
-        for (auto& det : speedDets) {
+        // 2. Filter Speed Limits
+        for (auto& det : currentSpeedDets) {
             float aspect = (float)det.box.height / std::max(det.box.width, 1);
             if (det.confidence > SPEED_CONF_THRESHOLD && aspect >= 1.0f && aspect <= 1.8f) {
                 auto it = SPEED_LIMIT_NAMES.find(det.classId);
                 std::string name = (it != SPEED_LIMIT_NAMES.end()) ? it->second : "";
-                
-                // Strip " MPH" for the HUD display
                 std::string limit = name;
                 size_t pos = limit.find(" MPH");
                 if (pos != std::string::npos) limit = limit.substr(0, pos);
                 currentSpeedLimit = limit;
-
-                // Draw bounding box
                 cv::rectangle(frame, det.box, cv::Scalar(255, 255, 255), 2);
                 cv::putText(frame, name, cv::Point(det.box.x, std::max(det.box.y - 10, 0)),
                     cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(255, 255, 255), 2);
@@ -452,25 +490,14 @@ void videoProcessingLoop(
         }
 
         // 3. Filter Traffic Signs & Lights
-        for (auto& det : signDets) {
+        for (auto& det : currentSignDets) {
             int cls = det.classId;
             float conf = det.confidence;
 
-            // Skip non-traffic-light classes
             if (cls != TRAFFIC_LIGHT_RED && cls != TRAFFIC_LIGHT_GREEN && cls != TRAFFIC_LIGHT_YELLOW) {
                 continue;
             }
 
-            // Confidence filter
-            if (conf < 0.40f) continue; // Force minimum 40% confidence for traffic lights to ignore red balloons
-
-            // Aspect ratio filter (ignore horizontal blackboards detected as green lights)
-            float aspect = (float)det.box.width / (float)std::max(det.box.height, 1);
-            if (aspect > 1.2f) {
-                continue; // Traffic lights are usually taller than they are wide, or square. If width > 1.2*height, ignore.
-            }
-
-            // Dark pixel analysis (balloon killer)
             if (!isRealTrafficLight(frame, det.box.x, det.box.y,
                     det.box.x + det.box.width, det.box.y + det.box.height)) {
                 continue;
@@ -566,7 +593,6 @@ void videoProcessingLoop(
         cv::putText(frame, speedText, cv::Point(20, 80),
             cv::FONT_HERSHEY_SIMPLEX, 0.9, cv::Scalar(255, 255, 255), 2, cv::LINE_AA);
 
-        // Encode to JPEG
         std::vector<uchar> jpegBuf;
         std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, 75};
         cv::imencode(".jpg", frame, jpegBuf, params);
@@ -578,6 +604,12 @@ void videoProcessingLoop(
             std::lock_guard<std::mutex> lock(state.mtx);
             state.currentJpeg = std::move(jpegBuf);
             state.currentVideoTimeSec = videoTimeSec;
+        }
+
+        auto frameEnd = std::chrono::steady_clock::now();
+        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(frameEnd - frameStart).count();
+        if (source == "VIDEO" && elapsed < 33) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(33 - elapsed));
         }
     }
 
